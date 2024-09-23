@@ -26,4 +26,12 @@ For each **LookUp** activity, I perform a query on the table based on incrementa
 
 Each parquet file in the Bronze layer is named using the corresponding data date. If a file with the same name already exists, it is replaced to prevent duplication. The folder structure is organized by the date of the fact data.
 
+The .parquet files and folder path appended in the bronze layer is named using the date of that data, using the following expression in the linked service:
+
+"folderPath": { "value": "raw/fact_table/incremental/@{formatDateTime(item().date_column, 'yyyy')}"
+
+fileName": { "value": "fact_table_@{item().date}", "type": "Expression"  }
+
+
+
 
