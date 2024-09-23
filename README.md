@@ -4,6 +4,7 @@ It involves ingesting data into a Fabric-based Lakehouse and processing it throu
 
 # Table of Contents
 Architecture Diagram
+![image](https://github.com/user-attachments/assets/752f7ed5-286f-4563-95d3-e579d329e19a)
 
 # Data Source
 ## 1st data source - Files on Storage Account ADSL Gen2 on Azure. 
