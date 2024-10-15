@@ -78,4 +78,148 @@ It's worth noting that while code suggestions are always welcome, there are time
 
 [Comparing Dataflow Gen2 vs Notebook on Costs and Usability](https://www.fourmoo.com/2024/01/25/microsoft-fabric-comparing-dataflow-gen2-vs-notebook-on-costs-and-usability/)
 
+## The first ingestion 
+For the initial ingestion, we need to populate all the data from the Bronze layer into Delta Tables in the Silver layer. At this stage, my focus will be on two primary aspects: data types and partitions.
 
+In classic Medallion Architecture, the recommendation is to prepare data for self-service BI and delivery using a semantic model, which would be ideal, especially in Microsoft Fabric. However, in my case, the business requires access to all data, which has its benefits from a Data Engineering perspective. This helps determine which tables need preparation for the Gold layer.
+
+Below is the code used for the ingestion process. As mentioned, the first step is to address data types by defining the schema, as demonstrated in the schema code below.
+
+```python
+from pyspark.sql.types import *
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType, DecimalType, DateType
+
+schema = StructType([
+    StructField("column1", DateType(), True),
+    StructField("column2", IntegerType(), True),
+    StructField("column3", IntegerType(), True),
+    StructField("column4", IntegerType(), True)
+])
+```
+
+## Optimization with Partitioning
+After addressing data types, we can proceed with optimizing the data. The .partitionBy function in Spark is highly beneficial for tables with large volumes of data. When Delta Tables are created, multiple .parquet files are generated in the underlying storage. Without partitioning, Spark needs to scan all these files—essentially behaving as if it were reading every book in a library to find what you're looking for. By applying partitions, you can label each "book" (file) by specific attributes, such as year, month, day, or hour, reducing the scan time significantly.
+
+In my case, each day's data ranges between 80MB and 110MB. After running several POCs, I decided to partition the data by year and month to strike a balance between file size and performance. Once a month is complete, we can run the OPTIMIZE function (to be discussed later) to further consolidate and optimize these files.
+
+Below is the code used for writing and partitioning the files.
+
+```python
+from pyspark.sql.functions import year, month, dayofmonth, col, date_format
+
+# Define the source path
+file_source = "abfss://xxxxxxxxxxx@onelake.dfs.fabric.microsoft.com/xxxxxxxxx/Files/raw/fact_table/"
+
+# Read the data from the source
+df = spark.read.schema(schema).parquet(file_source)
+
+# Define the schema for the columns and cast data types accordingly
+for field in schema.fields:
+    if field.name in df.columns:
+        df = df.withColumn(field.name, col(field.name).cast(field.dataType))
+    else:
+        print(f"Column not found: {field.name}")
+
+# Add day, month, and year columns for delta table optimization
+df_output = df.withColumn("day", dayofmonth(col("date")).cast("integer")) \
+              .withColumn("month", month(col("date")).cast("integer")) \
+              .withColumn("year", year(col("date")).cast("integer"))
+
+# Write to the delta table, partitioned by year and month
+df_output.write.format("delta") \
+    .mode("append") \
+    .option("mergeSchema", "true") \
+    .partitionBy("year", "month") \
+    .saveAsTable("Silver_Layer.fact_table")
+
+```
+
+## Reprocessing Fact Tables
+Certain business rules require reprocessing specific dates within the fact tables, depending on the needs of each sector.
+
+Reprocessing D-4
+The first step in this process involves using a Spark notebook to delete existing data from the fact table before ingesting the new data. The logic applied is to delete all records starting from two days before the current maximum date. After that, new data is ingested starting from this adjusted maximum date onward.
+
+Below is the code used for deleting data:
+
+```python
+from pyspark.sql import SparkSession
+from datetime import timedelta
+
+# Initialize the Spark session
+spark = SparkSession.builder.appName("DeleteData").getOrCreate()
+
+# Get the max date from the fact table
+max_date_query = spark.sql("SELECT MAX(date) AS max_date FROM schema.fact_table")
+max_date_row = max_date_query.collect()[0]
+max_date = max_date_row['max_date']
+
+# Calculate the limit date (D-3)
+limit_date = max_date - timedelta(days=2)
+
+# Format the limit date as a string, if necessary
+limit_date_str = limit_date.strftime('%Y-%m-%d')
+
+# Execute the DELETE query with the calculated limit date
+delete_query = f"DELETE FROM schema.fact_table WHERE date >= '{limit_date_str}'"
+spark.sql(delete_query)
+
+# Optionally, display the limit date for verification
+print(f"Data deleted starting from: {limit_date_str}")
+```
+
+To ensure that after deleting the data you are re-ingesting with the correct data types, you should set the schema properly before writing the new data back to the Delta table.
+
+```python
+from pyspark.sql.types import *
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType, DecimalType, DateType
+
+schema = StructType([
+    StructField("column1", DateType(), True),
+    StructField("column2", IntegerType(), True),
+    StructField("column3", IntegerType(), True),
+    StructField("column4", IntegerType(), True)
+])
+```
+
+With the schema defined, now we insert the data that was ingested in the date that was reprocessed.
+
+```python
+from pyspark.sql.functions import year, month, dayofmonth, col, date_format
+
+# Define the source path for incremental data
+file_source_incremental = "path_to_incremental_files"
+
+# Get the current max date from the Delta table
+max_date_populate = spark.sql("SELECT MAX(date) AS max_date FROM schema.fact_table")
+max_date_row = max_date_populate.collect()[0]
+max_date = max_date_row['max_date']
+
+# Read the incremental data from the source
+df = spark.read.option("schema", schema).parquet(file_source_incremental)
+
+# Filter the data where the date is greater than the current max date
+df = df.where(col("date") > max_date)
+
+# Cast all columns to the correct data types based on the schema
+for field in schema.fields:
+    if field.name in df.columns:
+        df = df.withColumn(field.name, col(field.name).cast(field.dataType))
+    else:
+        print(f"Column not found: {field.name}")
+
+# Add columns for day, month, and year for optimization and partitioning
+df_output = df.withColumn("DIA", dayofmonth(col("date")).cast("integer")) \
+              .withColumn("MES", month(col("date")).cast("integer")) \
+              .withColumn("ANO", year(col("date")).cast("integer"))
+
+# Write the data to the Delta table in append mode for incremental loads
+df_output.write.format("delta") \
+    .mode("append") \
+    .option("mergeSchema", "true") \
+    .partitionBy("ANO", "MES") \
+    .saveAsTable("schema.fact_table")
+
+# Display the output dataframe
+display(df_output)
+```
