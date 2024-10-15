@@ -28,10 +28,54 @@ Each parquet file in the Bronze layer is named using the corresponding data date
 
 The .parquet files and folder path appended in the bronze layer is named using the date of that data, using the following expression in the linked service:
 
+```json
 "folderPath": { "value": "raw/fact_table/incremental/@{formatDateTime(item().date_column, 'yyyy')}"
+```
 
+The folders will look like this:
+![image](https://github.com/user-attachments/assets/3488c83d-9e43-4826-bb50-90743921fa92)
+
+```json
 fileName": { "value": "fact_table_@{item().date}", "type": "Expression"  }
+```
+
+The files, will look like this:
+
+![image](https://github.com/user-attachments/assets/0d95d44a-278a-41ce-977a-44c5d28ba55b)
+
+The fact tables needed to be reprocessed regularly. In the Bronze (Raw) layer, all files are replaced when a new file with the same name is encountered. This approach prevents file duplication and ensures that only the latest data is retained. The storage structure is organized by date, making it easy to manage the data over time.
+
+For dimension tables, which don’t require reprocessing, I implemented a different logic. Currently, I am ingesting almost 50 tables daily from multiple Oracle databases. To avoid creating a separate pipeline for each table and to keep the Azure Data Factory more organized, I designed the following logic, as demonstrated in the figure below.
+
+![image](https://github.com/user-attachments/assets/31f90e97-11de-4716-bf06-11f3c1158fc6)
+
+I utilize a lookup process based on an aux_ingest.csv file, which contains two key columns. The first column specifies the schema where the table is located (either Schema A or Schema B), and the second column lists the exact table name as it appears in the database.
+
+Additionally, there are two filters in place to allow for the selection of specific tables for reprocessing, if necessary. This process is further illustrated in Table 1.
+
+![image](https://github.com/user-attachments/assets/b2a7bc22-d179-428c-b358-53948c5ea08b)
+
+Filters A and B are used to segment data by database, while the ForEach activity is configured to handle each database individually. To manage file organization in OneLake, I implemented an expression that dynamically creates a folder named after the table being processed:
+
+```json
+"folderPath": {
+    "value": "raw/@{item().table}",
+    "type": "Expression"
+}
+```
+
+The files in bronze layer will looks like this:
+![image](https://github.com/user-attachments/assets/1f76e35c-cafe-4b90-90d2-3bd08fd4cf95)
+
+![image](https://github.com/user-attachments/assets/7fcf0050-b35e-4550-b1e6-25e2bf7f66a4)
 
 
+
+# Processing data on Microsoft Fabric
+With the Parquet files stored in OneLake, the Bronze layer is ready for processing to create Delta Tables in the Silver layer, which is the default format in Microsoft Fabric.
+
+It's worth noting that while code suggestions are always welcome, there are times when we don’t have the luxury of refining everything for optimal performance—**you just need to deploy and move forward**. That being said, I chose to use Spark Notebooks for processing because, based on previous experience, POCs, and the following material, this approach appears to be both cost-effective and faster on Microsoft Fabric:
+
+[Comparing Dataflow Gen2 vs Notebook on Costs and Usability](https://www.fourmoo.com/2024/01/25/microsoft-fabric-comparing-dataflow-gen2-vs-notebook-on-costs-and-usability/)
 
 
